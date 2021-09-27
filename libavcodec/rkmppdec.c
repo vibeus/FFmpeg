@@ -502,20 +502,16 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
 
     rkmpp_update_fps(avctx);
 
-    // setup general frame fields
-    frame->format           = avctx->pix_fmt;
-    frame->width            = mpp_frame_get_width(mppframe);
-    frame->height           = mpp_frame_get_height(mppframe);
-
     if (avctx->pix_fmt != AV_PIX_FMT_DRM_PRIME) {
         ret = ff_get_buffer(avctx, frame, 0);
         if (ret < 0)
             goto out;
-
-        ret = rkmpp_convert_frame(avctx, frame, mppframe, buffer);
-        goto out;
     }
 
+    // setup general frame fields
+    frame->format           = avctx->pix_fmt;
+    frame->width            = mpp_frame_get_width(mppframe);
+    frame->height           = mpp_frame_get_height(mppframe);
     frame->pts              = mpp_frame_get_pts(mppframe);
     frame->reordered_opaque = frame->pts;
     frame->color_range      = mpp_frame_get_color_range(mppframe);
@@ -526,6 +522,11 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
     mode = mpp_frame_get_mode(mppframe);
     frame->interlaced_frame = ((mode & MPP_FRAME_FLAG_FIELD_ORDER_MASK) == MPP_FRAME_FLAG_DEINTERLACED);
     frame->top_field_first  = ((mode & MPP_FRAME_FLAG_FIELD_ORDER_MASK) == MPP_FRAME_FLAG_TOP_FIRST);
+
+    if (avctx->pix_fmt != AV_PIX_FMT_DRM_PRIME) {
+        ret = rkmpp_convert_frame(avctx, frame, mppframe, buffer);
+        goto out;
+    }
 
     mppformat = mpp_frame_get_fmt(mppframe);
     drmformat = rkmpp_get_frameformat(mppformat);
@@ -759,7 +760,7 @@ static const AVCodecHWConfigInternal *const rkmpp_hw_configs[] = {
         .hw_configs     = rkmpp_hw_configs, \
         .bsfs           = BSFS, \
         .p.wrapper_name = "rkmpp", \
-        .caps_internal  = FF_CODEC_CAP_NOT_INIT_THREADSAFE, \
+        .caps_internal  = FF_CODEC_CAP_NOT_INIT_THREADSAFE | FF_CODEC_CAP_CONTIGUOUS_BUFFERS \
     };
 
 RKMPP_DEC(h264,  AV_CODEC_ID_H264,          "h264_mp4toannexb")
