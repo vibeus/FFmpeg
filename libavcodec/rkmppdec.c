@@ -44,6 +44,11 @@
 #include <rga/RgaApi.h>
 #endif
 
+// HACK: Older BSP kernel use NA12 for NV15.
+#ifndef DRM_FORMAT_NV15 // fourcc_code('N', 'V', '1', '5')
+#define DRM_FORMAT_NV15 fourcc_code('N', 'A', '1', '2')
+#endif
+
 #define FPS_UPDATE_INTERVAL     120
 
 typedef struct {
@@ -89,9 +94,7 @@ static uint32_t rkmpp_get_frameformat(MppFrameFormat mppformat)
 {
     switch (mppformat) {
     case MPP_FMT_YUV420SP:          return DRM_FORMAT_NV12;
-#ifdef DRM_FORMAT_NV12_10
-    case MPP_FMT_YUV420SP_10BIT:    return DRM_FORMAT_NV12_10;
-#endif
+    case MPP_FMT_YUV420SP_10BIT:    return DRM_FORMAT_NV15;
     default:                        return 0;
     }
 }
