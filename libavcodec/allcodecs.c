@@ -50,6 +50,7 @@ extern AVCodec ff_asv2_encoder;
 extern AVCodec ff_asv2_decoder;
 extern AVCodec ff_aura_decoder;
 extern AVCodec ff_aura2_decoder;
+extern AVCodec ff_av1_rkmpp_decoder;
 extern AVCodec ff_avrp_encoder;
 extern AVCodec ff_avrp_decoder;
 extern AVCodec ff_avrn_decoder;
