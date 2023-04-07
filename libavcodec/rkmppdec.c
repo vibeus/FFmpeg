@@ -39,11 +39,6 @@
 #include "libavutil/imgutils.h"
 #include "libavutil/log.h"
 
-#if CONFIG_LIBRGA
-#include <rga/rga.h>
-#include <rga/RgaApi.h>
-#endif
-
 // HACK: Older BSP kernel use NA12 for NV15.
 #ifndef DRM_FORMAT_NV15 // fourcc_code('N', 'V', '1', '5')
 #define DRM_FORMAT_NV15 fourcc_code('N', 'A', '1', '2')
@@ -116,18 +111,6 @@ static uint32_t rkmpp_get_avformat(MppFrameFormat mppformat)
     default:                        return 0;
     }
 }
-
-#if CONFIG_LIBRGA
-static uint32_t rkmpp_get_rgaformat(MppFrameFormat mppformat)
-{
-    switch (mppformat & MPP_FRAME_FMT_MASK) {
-    case MPP_FMT_YUV420SP:          return RK_FORMAT_YCbCr_420_SP;
-    case MPP_FMT_YUV420SP_10BIT:    return RK_FORMAT_YCbCr_420_SP_10B;
-    case MPP_FMT_YUV422SP:          return RK_FORMAT_YCbCr_422_SP;
-    default:                        return RK_FORMAT_UNKNOWN;
-    }
-}
-#endif
 
 static int rkmpp_close_decoder(AVCodecContext *avctx)
 {
@@ -313,9 +296,6 @@ static int rkmpp_convert_frame(AVCodecContext *avctx, AVFrame *frame,
     char *dst_y = frame->data[0];
     char *dst_u = frame->data[1];
     char *dst_v = frame->data[2];
-#if CONFIG_LIBRGA
-    RgaSURF_FORMAT format = rkmpp_get_rgaformat(mpp_frame_get_fmt(mppframe));
-#endif
     int width = mpp_frame_get_width(mppframe);
     int height = mpp_frame_get_height(mppframe);
     int hstride = mpp_frame_get_hor_stride(mppframe);
@@ -325,51 +305,6 @@ static int rkmpp_convert_frame(AVCodecContext *avctx, AVFrame *frame,
     int v_pitch = frame->linesize[2];
     int i, j;
 
-#if CONFIG_LIBRGA
-    rga_info_t src_info = {0};
-    rga_info_t dst_info = {0};
-    int dst_height = (dst_u - dst_y) / y_pitch;
-
-    static int rga_supported = 1;
-    static int rga_inited = 0;
-
-    if (!rga_supported)
-        goto bail;
-
-    if (!rga_inited) {
-        if (c_RkRgaInit() < 0) {
-            rga_supported = 0;
-            av_log(avctx, AV_LOG_WARNING, "RGA not available\n");
-            goto bail;
-        }
-        rga_inited = 1;
-    }
-
-    if (format == RK_FORMAT_UNKNOWN)
-        goto bail;
-
-    if (u_pitch != y_pitch / 2 || v_pitch != y_pitch / 2 ||
-        dst_u != dst_y + y_pitch * dst_height ||
-        dst_v != dst_u + u_pitch * dst_height / 2)
-        goto bail;
-
-    src_info.fd = mpp_buffer_get_fd(buffer);
-    src_info.mmuFlag = 1;
-    rga_set_rect(&src_info.rect, 0, 0, width, height, hstride, vstride,
-                 format);
-
-    dst_info.virAddr = dst_y;
-    dst_info.mmuFlag = 1;
-    rga_set_rect(&dst_info.rect, 0, 0, frame->width, frame->height,
-                 y_pitch, dst_height, RK_FORMAT_YCbCr_420_P);
-
-    if (c_RkRgaBlit(&src_info, &dst_info, NULL) < 0)
-        goto bail;
-
-    return 0;
-
-bail:
-#endif
     if (mpp_frame_get_fmt(mppframe) != MPP_FMT_YUV420SP) {
         av_log(avctx, AV_LOG_WARNING, "Unable to convert\n");
         return -1;
@@ -532,7 +467,7 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
     if (avctx->pix_fmt != AV_PIX_FMT_DRM_PRIME) {
         ret = ff_get_buffer(avctx, frame, 0);
         if (ret < 0)
-            goto out;
+            goto fail;
     }
 
     // setup general frame fields
@@ -611,7 +546,6 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
 
     return 0;
 
-out:
 fail:
     if (mppframe)
         mpp_frame_deinit(&mppframe);
