@@ -38,6 +38,7 @@
 #include "libavutil/hwcontext_drm.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/log.h"
+#include "libyuv/planar_functions.h"
 
 // HACK: Older BSP kernel use NA12 for NV15.
 #ifndef DRM_FORMAT_NV15 // fourcc_code('N', 'V', '1', '5')
@@ -289,44 +290,41 @@ static void rkmpp_release_frame(void *opaque, uint8_t *data)
     av_free(desc);
 }
 
+static void rkmpp_release_buffer(void *opaque, uint8_t *data)
+{
+    MppFrame mppframe = opaque;
+    mpp_frame_deinit(&mppframe);
+}
+
 static int rkmpp_convert_frame(AVCodecContext *avctx, AVFrame *frame,
                                MppFrame mppframe, MppBuffer buffer)
 {
     char *src = mpp_buffer_get_ptr(buffer);
-    char *dst_y = frame->data[0];
     char *dst_u = frame->data[1];
     char *dst_v = frame->data[2];
-    int width = mpp_frame_get_width(mppframe);
-    int height = mpp_frame_get_height(mppframe);
     int hstride = mpp_frame_get_hor_stride(mppframe);
     int vstride = mpp_frame_get_ver_stride(mppframe);
-    int y_pitch = frame->linesize[0];
     int u_pitch = frame->linesize[1];
     int v_pitch = frame->linesize[2];
-    int i, j;
 
-    if (mpp_frame_get_fmt(mppframe) != MPP_FMT_YUV420SP) {
-        av_log(avctx, AV_LOG_WARNING, "Unable to convert\n");
-        return -1;
+    //data[0] points to buf[1] where the mppbuffer is referenced for y plane
+    //so that we can still use y plane without extra copies
+    //data[1,2] points to allready allocated AVBuffer Pool (buf[0]), we will convert to
+    //that buffer only u+v planes, which is half the size operation
+    frame->data[0] = mpp_buffer_get_ptr(buffer);
+    frame->buf[1] = av_buffer_create(frame->data[0], mpp_buffer_get_size(buffer),
+            rkmpp_release_buffer, mppframe,
+            AV_BUFFER_FLAG_READONLY);
+    if (!frame->buf[1]) {
+        return AVERROR(ENOMEM);
     }
-
-    av_log(avctx, AV_LOG_WARNING, "Doing slow software conversion\n");
-
-    for (i = 0; i < frame->height; i++)
-        memcpy(dst_y + i * y_pitch, src + i * hstride, frame->width);
+    frame->linesize[0] = hstride;
+    av_log(avctx, AV_LOG_WARNING, "Doing software conversion for uv planes\n");
 
     src += hstride * vstride;
 
-    for (i = 0; i < frame->height / 2; i++) {
-        for (j = 0; j < frame->width; j++) {
-            dst_u[j] = src[2 * j + 0];
-            dst_v[j] = src[2 * j + 1];
-        }
-        dst_u += u_pitch;
-        dst_v += v_pitch;
-        src += hstride;
-    }
-
+    SplitUVPlane(src, hstride, dst_u, u_pitch, dst_v, v_pitch,
+            (frame->width + 1) >> 1, (frame->height + 1) >> 1);
     return 0;
 }
 
@@ -486,8 +484,7 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
     frame->top_field_first  = ((mode & MPP_FRAME_FLAG_FIELD_ORDER_MASK) == MPP_FRAME_FLAG_TOP_FIRST);
 
     if (avctx->pix_fmt != AV_PIX_FMT_DRM_PRIME) {
-        ret = rkmpp_convert_frame(avctx, frame, mppframe, buffer);
-        goto out;
+        return rkmpp_convert_frame(avctx, frame, mppframe, buffer);
     }
 
     mppformat = mpp_frame_get_fmt(mppframe);
