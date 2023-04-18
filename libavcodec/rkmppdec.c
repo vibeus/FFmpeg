@@ -26,6 +26,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <fcntl.h>
 
 #include "avcodec.h"
 #include "decode.h"
@@ -39,6 +40,7 @@
 #include "libavutil/imgutils.h"
 #include "libavutil/log.h"
 #include "libyuv/planar_functions.h"
+#include "rga.h"
 
 // HACK: Older BSP kernel use NA12 for NV15.
 #ifndef DRM_FORMAT_NV15 // fourcc_code('N', 'V', '1', '5')
@@ -54,6 +56,7 @@ typedef struct {
 
     int8_t eos;
     int8_t draining;
+    int8_t softconvert;
 
     AVPacket packet;
     AVBufferRef *frames_ref;
@@ -65,6 +68,8 @@ typedef struct {
     uint64_t frames;
 
     char sync;
+
+    int rga_fd;
 } RKMPPDecoder;
 
 typedef struct {
@@ -113,6 +118,16 @@ static uint32_t rkmpp_get_avformat(MppFrameFormat mppformat)
     }
 }
 
+static uint32_t rkmpp_get_rgaformat(MppFrameFormat mppformat)
+{
+    switch (mppformat & MPP_FRAME_FMT_MASK) {
+    case MPP_FMT_YUV420SP:          return RGA_FORMAT_YCbCr_420_SP;
+    case MPP_FMT_YUV420SP_10BIT:    return RGA_FORMAT_YCbCr_420_SP_10B;
+    case MPP_FMT_YUV422SP:          return RGA_FORMAT_YCbCr_422_SP;
+    default:                        return RGA_FORMAT_UNKNOWN;
+    }
+}
+
 static int rkmpp_close_decoder(AVCodecContext *avctx)
 {
     RKMPPDecodeContext *rk_context = avctx->priv_data;
@@ -137,6 +152,11 @@ static void rkmpp_release_decoder(void *opaque, uint8_t *data)
     if (decoder->frame_group) {
         mpp_buffer_group_put(decoder->frame_group);
         decoder->frame_group = NULL;
+    }
+
+    if (decoder->rga_fd) {
+        close(decoder->rga_fd);
+        decoder->rga_fd = 0;
     }
 
     av_buffer_unref(&decoder->frames_ref);
@@ -243,6 +263,11 @@ static int rkmpp_init_decoder(AVCodecContext *avctx)
        goto fail;
     }
 
+    decoder->rga_fd = open("/dev/rga", O_RDWR);
+    if (decoder->rga_fd < 0) {
+       av_log(avctx, AV_LOG_WARNING, "Failed to open RGA, Falling back to libyuv\n");
+    }
+
     ret = decoder->mpi->control(decoder->ctx, MPP_DEC_SET_EXT_BUF_GROUP, decoder->frame_group);
     if (ret) {
         av_log(avctx, AV_LOG_ERROR, "Failed to assign buffer group (code = %d)\n", ret);
@@ -299,14 +324,67 @@ static void rkmpp_release_buffer(void *opaque, uint8_t *data)
 static int rkmpp_convert_frame(AVCodecContext *avctx, AVFrame *frame,
                                MppFrame mppframe, MppBuffer buffer)
 {
+    RKMPPDecodeContext *rk_context = avctx->priv_data;
+    RKMPPDecoder *decoder = (RKMPPDecoder *)rk_context->decoder_ref->data;
+
     char *src = mpp_buffer_get_ptr(buffer);
+    char *dst_y = frame->data[0];
     char *dst_u = frame->data[1];
     char *dst_v = frame->data[2];
+    enum rga_surf_format rgaformat = rkmpp_get_rgaformat(mpp_frame_get_fmt(mppframe));
+    int width = mpp_frame_get_width(mppframe);
+    int height = mpp_frame_get_height(mppframe);
     int hstride = mpp_frame_get_hor_stride(mppframe);
     int vstride = mpp_frame_get_ver_stride(mppframe);
+    int y_pitch = frame->linesize[0];
     int u_pitch = frame->linesize[1];
     int v_pitch = frame->linesize[2];
 
+    int ret;
+
+    int dst_height = (dst_u - dst_y) / y_pitch;
+
+    if (decoder->softconvert || decoder->rga_fd < 0)
+        goto softconvert;
+
+    struct rga_req req = {
+        .src = {
+            .yrgb_addr = mpp_buffer_get_fd(buffer),
+            .v_addr = hstride * vstride,
+            .format = rgaformat,
+            .act_w = width,
+            .act_h = height,
+            .vir_w = hstride,
+            .vir_h = vstride,
+            .rd_mode = RGA_RASTER_MODE,
+        },
+        .dst = {
+            .uv_addr = (uintptr_t) dst_y,
+            .v_addr = (uintptr_t) dst_u,
+            .format = RGA_FORMAT_YCbCr_420_P,
+            .act_w = width,
+            .act_h = height,
+            .vir_w = y_pitch,
+            .vir_h = dst_height,
+            .rd_mode = RGA_RASTER_MODE,
+        },
+        .mmu_info = {
+            .mmu_en = 1,
+            .mmu_flag = 0x80000521,
+        },
+    };
+
+    ret = ioctl(decoder->rga_fd, RGA_BLIT_SYNC, &req);
+    if (ret < 0){
+        decoder->softconvert = 1;
+        av_log(avctx, AV_LOG_WARNING, "RGA failed with code %d, falling back to soft conversion of uv planes\n");
+        goto softconvert;
+    }
+
+    rkmpp_release_buffer(mppframe, NULL);
+    return 0;
+
+softconvert:
     //data[0] points to buf[1] where the mppbuffer is referenced for y plane
     //so that we can still use y plane without extra copies
     //data[1,2] points to allready allocated AVBuffer Pool (buf[0]), we will convert to
@@ -319,7 +397,6 @@ static int rkmpp_convert_frame(AVCodecContext *avctx, AVFrame *frame,
         return AVERROR(ENOMEM);
     }
     frame->linesize[0] = hstride;
-    av_log(avctx, AV_LOG_WARNING, "Doing software conversion for uv planes\n");
 
     src += hstride * vstride;
 
@@ -685,6 +762,7 @@ static void rkmpp_flush(AVCodecContext *avctx)
 
     decoder->eos = 0;
     decoder->draining = 0;
+    decoder->softconvert = 0;
     decoder->last_fps_time = decoder->frames = 0;
 
     av_packet_unref(&decoder->packet);
