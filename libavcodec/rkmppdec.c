@@ -50,7 +50,7 @@
 #define DRM_FORMAT_NV15 fourcc_code('N', 'A', '1', '2')
 #endif
 
-#define FPS_UPDATE_INTERVAL     60
+#define FPS_FRAME_MACD 30
 
 typedef struct {
     MppCtx ctx;
@@ -65,8 +65,9 @@ typedef struct {
 
     char print_fps;
 
-    uint64_t last_fps_time;
+    uint64_t last_frame_time;
     uint64_t frames;
+    uint64_t latencies[FPS_FRAME_MACD];
 
     uint32_t mpp_format;
     uint32_t rga_informat;
@@ -392,34 +393,37 @@ fail:
     return ret;
 }
 
-static void rkmpp_update_fps(AVCodecContext *avctx)
+static uint64_t rkmpp_update_latency(AVCodecContext *avctx, uint64_t latency)
 {
     RKMPPDecodeContext *rk_context = avctx->priv_data;
     RKMPPDecoder *decoder = (RKMPPDecoder *)rk_context->decoder_ref->data;
-    struct timeval tv;
+    struct timespec tv;
     uint64_t curr_time;
-    float fps;
+    float fps = 0.0f;
 
     if (!decoder->print_fps)
-        return;
+        return 0;
 
-    if (!decoder->last_fps_time) {
-        gettimeofday(&tv, NULL);
-        decoder->last_fps_time = tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    clock_gettime(CLOCK_MONOTONIC, &tv);
+    curr_time = tv.tv_sec * 10e5 + tv.tv_nsec / 10e2;
+    if (latency == -1){
+		latency = decoder->last_frame_time ? curr_time - decoder->last_frame_time : 0;
+		decoder->last_frame_time = curr_time;
+		decoder->latencies[++decoder->frames % FPS_FRAME_MACD] = latency;
+		return latency;
+    } else if (latency == 0 || decoder->frames < FPS_FRAME_MACD) {
+    	fps = -1.0f;
+    } else {
+	   for(int i = 0; i < FPS_FRAME_MACD; i++) {
+		  fps += decoder->latencies[i];
+	   }
+    	fps = FPS_FRAME_MACD * 1000000.0f / fps;
     }
+	av_log(avctx, AV_LOG_INFO,
+		   "[FFMPEG RKMPP] FPS(MACD%d): %6.1f || Frames: %" PRIu64 " || Latency: %" PRIu64 "us || Buffer Delay %" PRIu64 "us\n",
+		   FPS_FRAME_MACD, fps, decoder->frames, latency, (uint64_t)(curr_time - decoder->last_frame_time));
 
-    if (++decoder->frames % FPS_UPDATE_INTERVAL)
-        return;
-
-    gettimeofday(&tv, NULL);
-    curr_time = tv.tv_sec * 1000 + tv.tv_usec / 1000;
-
-    fps = 1000.0f * FPS_UPDATE_INTERVAL / (curr_time - decoder->last_fps_time);
-    decoder->last_fps_time = curr_time;
-
-    av_log(avctx, AV_LOG_INFO,
-           "[FFMPEG RKMPP] FPS: %6.1f || Frames: %" PRIu64 "\n",
-           fps, decoder->frames);
+    return 0;
 }
 
 static int rkmpp_set_drm_buf(AVCodecContext *avctx, AVFrame *frame, MppFrame mppframe)
@@ -566,7 +570,7 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
     RKMPPDecoder *decoder = (RKMPPDecoder *)rk_context->decoder_ref->data;
     MppFrame mppframe = NULL;
     MppBuffer buffer = NULL;
-    int ret, mode;
+    int ret, mode, latency;
 
     // should not provide any frame after EOS
     if (decoder->eos)
@@ -658,7 +662,7 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
         goto fail;
     }
 
-    rkmpp_update_fps(avctx);
+    latency = rkmpp_update_latency(avctx, -1);
 
     if(!decoder->buffer_callback){
     	ret = AVERROR_UNKNOWN;
@@ -672,6 +676,8 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
         av_log(avctx, AV_LOG_ERROR, "Failed set frame buffer (code = %d)\n", ret);
         goto fail;
     }
+
+    latency = rkmpp_update_latency(avctx, latency);
 
     // setup general frame fields
     frame->format           = avctx->pix_fmt;
@@ -812,7 +818,7 @@ static void rkmpp_flush(AVCodecContext *avctx)
     decoder->eos = 0;
     decoder->norga = 0;
 
-    decoder->last_fps_time = decoder->frames = 0;
+    decoder->last_frame_time = decoder->frames = 0;
 
     av_packet_unref(&decoder->packet);
 }
