@@ -75,7 +75,6 @@ typedef struct {
     uint32_t drm_format;
     uint32_t sw_format;
     int rga_fd;
-    int8_t rgafbc;
     int8_t norga;
     int (*buffer_callback)(struct AVCodecContext *avctx, struct AVFrame *frame, MppFrame mppframe);
 
@@ -287,8 +286,6 @@ static int rkmpp_init_decoder(AVCodecContext *avctx)
     char *env;
     int ret;
 
-    avctx->pix_fmt = ff_get_format(avctx, avctx->codec->pix_fmts);
-
     // create a decoder and a ref to it
     decoder = av_mallocz(sizeof(RKMPPDecoder));
     if (!decoder) {
@@ -350,8 +347,24 @@ static int rkmpp_init_decoder(AVCodecContext *avctx)
        goto fail;
     }
 
-    env = getenv("FFMPEG_RKMPP_NORGA");
-    if (env != NULL)
+    avctx->pix_fmt = ff_get_format(avctx, avctx->codec->pix_fmts);
+
+    // override the the pixfmt according env variable
+    env = getenv("FFMPEG_RKMPP_PIXFMT");
+    if(env != NULL){
+        if(!strcmp(env, "YUV420P"))
+        	avctx->pix_fmt = AV_PIX_FMT_YUV420P;
+        else if (!strcmp(env, "NV12"))
+        	avctx->pix_fmt = AV_PIX_FMT_NV12;
+    	else if(!strcmp(env, "DRMPRIME"))
+    		avctx->pix_fmt = AV_PIX_FMT_DRM_PRIME;
+        else if(!strcmp(env, "YUV420PSOFT")){
+           	avctx->pix_fmt = AV_PIX_FMT_YUV420P;
+           	decoder->norga = 1;
+        }
+    }
+
+    if (decoder->norga)
         decoder->rga_fd = -1;
     else {
         decoder->rga_fd = open("/dev/rga", O_RDWR);
@@ -844,8 +857,8 @@ static void rkmpp_flush(AVCodecContext *avctx)
         .p.priv_class   = &rkmpp_##NAME##_dec_class, \
         .p.capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_AVOID_PROBING | AV_CODEC_CAP_HARDWARE, \
         .p.pix_fmts     = (const enum AVPixelFormat[]) { AV_PIX_FMT_DRM_PRIME, \
-        												 AV_PIX_FMT_NV12, \
                                                          AV_PIX_FMT_YUV420P, \
+        												 AV_PIX_FMT_NV12, \
                                                          AV_PIX_FMT_NONE}, \
         .hw_configs     = (const AVCodecHWConfigInternal *const []) { HW_CONFIG_INTERNAL(DRM_PRIME), \
                                                                       HW_CONFIG_INTERNAL(NV12), \
