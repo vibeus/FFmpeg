@@ -703,6 +703,12 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
     frame->color_trc        = mpp_frame_get_color_trc(mppframe);
     frame->colorspace       = mpp_frame_get_colorspace(mppframe);
 
+    // when mpp can not determine the color space, it returns reserved (0) value
+    // firefox does not understand this and instead expect unspecified (2) values
+    frame->color_primaries  = frame->color_primaries == AVCOL_PRI_RESERVED0 ? AVCOL_PRI_UNSPECIFIED : frame->color_primaries;
+    frame->color_trc		= frame->color_trc == AVCOL_TRC_RESERVED0 ? AVCOL_TRC_UNSPECIFIED : frame->color_trc;
+    frame->colorspace		= frame->colorspace == AVCOL_SPC_RGB ? AVCOL_SPC_UNSPECIFIED: frame->color_trc;
+
     mode = mpp_frame_get_mode(mppframe);
     frame->interlaced_frame = ((mode & MPP_FRAME_FLAG_FIELD_ORDER_MASK) == MPP_FRAME_FLAG_DEINTERLACED);
     frame->top_field_first  = ((mode & MPP_FRAME_FLAG_FIELD_ORDER_MASK) == MPP_FRAME_FLAG_TOP_FIRST);
