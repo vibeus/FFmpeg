@@ -679,7 +679,7 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
 
     if(!decoder->buffer_callback){
     	ret = AVERROR_UNKNOWN;
-        av_log(avctx, AV_LOG_ERROR, "Decoder has no valid buffer_callback\n");
+    	av_log(avctx, AV_LOG_ERROR, "Decoder can't set output for MPP format:%d and AVFormat:%d.\n", decoder->mpp_format, avctx->pix_fmt);
         goto fail;
     }
 
