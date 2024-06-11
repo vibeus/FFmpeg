@@ -168,7 +168,7 @@ static av_cold int rkmpp_decode_init(AVCodecContext *avctx)
         break;
     case AV_PIX_FMT_NONE: /* fallback to drm_prime */
         is_fmt_supported = 1;
-        avctx->pix_fmt = AV_PIX_FMT_DRM_PRIME;
+        avctx->pix_fmt = AV_PIX_FMT_YUV420P;
         break;
     default:
         is_fmt_supported = 0;
